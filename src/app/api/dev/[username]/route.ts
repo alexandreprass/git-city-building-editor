@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getSupabaseAdmin } from "@/lib/supabase";
 import type { TopRepo } from "@/lib/github";
+import { calculateGithubXp } from "@/lib/xp";
 
 // ─── Rate Limiting ───────────────────────────────────────────
 
@@ -435,8 +436,24 @@ export async function GET(
       );
     }
 
-    // New building added to the city → feed event
+    // Recalculate GitHub XP and grant diff
     const devId = upserted?.id;
+    if (devId) {
+      const newGithubXp = calculateGithubXp({
+        contributions: expanded?.contributions_total ?? contributions,
+        total_stars: totalStars,
+        public_repos: ghUser.public_repos,
+        total_prs: expanded?.total_prs ?? 0,
+      });
+      const prevGithubXp = (cached?.xp_github as number) ?? 0;
+      if (newGithubXp > prevGithubXp) {
+        const diff = newGithubXp - prevGithubXp;
+        await sb.rpc("grant_xp", { p_developer_id: devId, p_source: "github", p_amount: diff });
+        await sb.from("developers").update({ xp_github: newGithubXp }).eq("id", devId);
+      }
+    }
+
+    // New building added to the city → feed event
     if (isNewDev && devId) {
       await sb.from("activity_feed").insert({
         event_type: "dev_joined",

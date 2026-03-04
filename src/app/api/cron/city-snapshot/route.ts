@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
       fetchAll<Record<string, any>>(
         sb,
         "developers",
-        "id, github_login, name, avatar_url, contributions, total_stars, public_repos, primary_language, rank, claimed, kudos_count, visit_count, contributions_total, contribution_years, total_prs, total_reviews, repos_contributed_to, followers, following, organizations_count, account_created_at, current_streak, active_days_last_year, language_diversity, app_streak, rabbit_completed, district, district_chosen",
+        "id, github_login, name, avatar_url, contributions, total_stars, public_repos, primary_language, rank, claimed, kudos_count, visit_count, contributions_total, contribution_years, total_prs, total_reviews, repos_contributed_to, followers, following, organizations_count, account_created_at, current_streak, active_days_last_year, language_diversity, app_streak, rabbit_completed, district, district_chosen, xp_total, xp_level",
         undefined,
         "rank",
       ),
@@ -153,6 +153,8 @@ export async function GET(request: NextRequest) {
     current_week_kudos_received: dev.current_week_kudos_received ?? 0,
     active_raid_tag: raidTagMap[dev.id] ?? null,
     rabbit_completed: dev.rabbit_completed ?? false,
+    xp_total: dev.xp_total ?? 0,
+    xp_level: dev.xp_level ?? 1,
   }));
 
   const snapshot = JSON.stringify({

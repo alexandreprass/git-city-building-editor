@@ -32,6 +32,9 @@ import PillModal from "@/components/PillModal";
 import FounderMessage from "@/components/FounderMessage";
 import RabbitCompletion from "@/components/RabbitCompletion";
 import DistrictChooser from "@/components/DistrictChooser";
+import XpBar from "@/components/XpBar";
+import LevelUpToast from "@/components/LevelUpToast";
+import { rankFromLevel, tierFromLevel, levelProgress, xpForLevel } from "@/lib/xp";
 import LoadingScreen, { type LoadingStage } from "@/components/LoadingScreen";
 import MiniMap from "@/components/MiniMap";
 import { getCityCache, setCityCache, clearCityCache } from "@/lib/cityCache";
@@ -472,6 +475,9 @@ function HomeContent() {
   // Welcome CTA (shown after intro for non-logged-in users)
   const [welcomeCtaVisible, setWelcomeCtaVisible] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // XP level-up toast
+  const [levelUpLevel, setLevelUpLevel] = useState<number | null>(null);
 
   // Fly onboarding
   const [showDailyNudge, setShowDailyNudge] = useState(false);
@@ -1549,6 +1555,16 @@ if (claimingGift) return;
   // Stable ref so closures (visit useEffect, kudos callback) always use latest
   const trackMissionRef = useRef(trackClientMission);
   trackMissionRef.current = trackClientMission;
+
+  // Detect level-up from check-in XP result
+  useEffect(() => {
+    if (!streakData?.xp || !myBuilding) return;
+    const newLevel = streakData.xp.new_level;
+    const currentLevel = myBuilding.xp_level ?? 1;
+    if (newLevel > currentLevel) {
+      setLevelUpLevel(newLevel);
+    }
+  }, [streakData?.xp, myBuilding]);
 
   // Live users presence
   const { count: liveUsers, status: liveStatus } = useLiveUsers();
@@ -2673,6 +2689,13 @@ if (claimingGift) return;
                         </span>
                       )}
                     </Link>
+                    {myBuilding?.claimed && (
+                      <XpBar
+                        xpTotal={myBuilding.xp_total ?? 0}
+                        xpLevel={myBuilding.xp_level ?? 1}
+                        accent={theme.accent}
+                      />
+                    )}
                     <button
                       onClick={handleSignOut}
                       className="border-[2px] border-border bg-bg/80 px-2 py-1 text-[9px] text-muted backdrop-blur-sm transition-colors hover:text-cream hover:border-border-light"
@@ -2901,6 +2924,47 @@ if (claimingGift) return;
                   )}
                 </div>
               </div>
+
+              {/* XP Level badge + progress */}
+              {(() => {
+                const bTier = tierFromLevel(selectedBuilding.xp_level ?? 1);
+                const bRank = rankFromLevel(selectedBuilding.xp_level ?? 1);
+                const bProgress = levelProgress(selectedBuilding.xp_total ?? 0);
+                const bXpCurrent = (selectedBuilding.xp_total ?? 0) - xpForLevel(selectedBuilding.xp_level ?? 1);
+                const bXpNeeded = xpForLevel((selectedBuilding.xp_level ?? 1) + 1) - xpForLevel(selectedBuilding.xp_level ?? 1);
+                return (
+                  <div className="mx-4 mb-2 flex items-center gap-2">
+                    <span
+                      className="flex h-7 w-7 items-center justify-center border-[2px] text-xs font-bold"
+                      style={{ borderColor: bTier.color, color: bTier.color }}
+                    >
+                      {selectedBuilding.xp_level ?? 1}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-bold" style={{ color: bTier.color }}>
+                          Lv {selectedBuilding.xp_level ?? 1} · {bRank.title}
+                        </span>
+                        <span
+                          className="px-1 py-px text-[7px] font-bold"
+                          style={{ backgroundColor: bTier.color + "22", color: bTier.color }}
+                        >
+                          {bTier.name.toUpperCase()}
+                        </span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5">
+                        <div className="h-[4px] flex-1 bg-border">
+                          <div
+                            className="h-full"
+                            style={{ width: `${Math.max(2, Math.round(bProgress * 100))}%`, backgroundColor: bTier.color }}
+                          />
+                        </div>
+                        <span className="text-[7px] text-muted">{bXpCurrent}/{bXpNeeded}</span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* District badge */}
               {selectedBuilding.district && (
@@ -3756,6 +3820,11 @@ if (claimingGift) return;
             }
           `}</style>
         </div>
+      )}
+
+      {/* ─── Level Up Toast ─── */}
+      {levelUpLevel !== null && (
+        <LevelUpToast level={levelUpLevel} onDone={() => setLevelUpLevel(null)} />
       )}
 
       {/* ─── Activity Ticker ─── */}
