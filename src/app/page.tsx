@@ -4,7 +4,7 @@ import { useState, useCallback, useEffect, useLayoutEffect, useRef, useMemo, Sus
 import { useSearchParams } from "next/navigation";
 import dynamic from "next/dynamic";
 import type { Session } from "@supabase/supabase-js";
-import { createBrowserSupabase } from "@/lib/supabase";
+import { createBrowserSupabase, hasBrowserSupabaseEnv } from "@/lib/supabase";
 import {
   generateCityLayout,
   DISTRICT_NAMES,
@@ -71,6 +71,46 @@ const THEMES = [
   { name: "Neon",     accent: "#e040c0", shadow: "#600860" },
   { name: "Emerald",  accent: "#f0c060", shadow: "#806020" },
 ];
+
+const EDITOR_BUILDING_STORAGE_KEY = "gitcity_editor_building_v1";
+
+type EditorSavedBlock = {
+  x?: number;
+  top?: number;
+  widthUnits?: number;
+  heightUnits?: number;
+  color?: string;
+};
+
+type EditorSavedVoxel = {
+  x?: number;
+  y?: number;
+  z?: number;
+  color?: string;
+};
+
+type EditorSavedPayload = {
+  version?: number;
+  grid?: { floors?: number; cols?: number; rows?: number; depth?: number };
+  blocks?: EditorSavedBlock[];
+  voxels?: EditorSavedVoxel[];
+  copy_all_sides?: boolean;
+};
+
+function parseEditorPayload(raw: string | null): EditorSavedPayload | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as EditorSavedPayload;
+    if (!parsed || typeof parsed !== "object") return null;
+    const hasBlocks = Array.isArray(parsed.blocks) && parsed.blocks.length > 0;
+    const hasVoxels = Array.isArray(parsed.voxels) && parsed.voxels.length > 0;
+    if (!hasBlocks && !hasVoxels) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 
 // Achievement display data for profile card (client-side, mirrors DB)
 const TIER_COLORS_MAP: Record<string, string> = {
@@ -395,6 +435,8 @@ function HomeContent() {
   const [introPhase, setIntroPhase] = useState(-1); // -1 = not started, 0-3 = text phases, 4 = done
   const [exploreMode, setExploreMode] = useState(false);
   const [themeIndex, setThemeIndex] = useState(0);
+  const [editorPayload, setEditorPayload] = useState<EditorSavedPayload | null>(null);
+  const supabaseEnabled = hasBrowserSupabaseEnv();
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -403,6 +445,24 @@ function HomeContent() {
       const n = parseInt(saved, 10);
       if (n >= 0 && n <= 3) setThemeIndex(n);
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const loadEditorSave = () => {
+      setEditorPayload(parseEditorPayload(localStorage.getItem(EDITOR_BUILDING_STORAGE_KEY)));
+    };
+
+    loadEditorSave();
+    window.addEventListener("focus", loadEditorSave);
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === EDITOR_BUILDING_STORAGE_KEY) loadEditorSave();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("focus", loadEditorSave);
+      window.removeEventListener("storage", onStorage);
+    };
   }, []);
 
 
@@ -461,6 +521,31 @@ function HomeContent() {
   const [rabbitCinematic, setRabbitCinematic] = useState(false);
   const [rabbitCinematicPhase, setRabbitCinematicPhase] = useState(-1);
   const [rabbitProgress, setRabbitProgress] = useState(0);
+  const renderBuildings = buildings;
+  const editorDebugInfo = useMemo(() => {
+    if (!editorPayload) return null;
+    const colorCount = new Map<string, number>();
+    if (Array.isArray(editorPayload.voxels) && editorPayload.voxels.length > 0) {
+      for (const v of editorPayload.voxels) {
+        const c = typeof v.color === "string" ? v.color : "invalid";
+        colorCount.set(c, (colorCount.get(c) ?? 0) + 1);
+      }
+    } else if (Array.isArray(editorPayload.blocks)) {
+      for (const b of editorPayload.blocks) {
+        const c = typeof b.color === "string" ? b.color : "invalid";
+        colorCount.set(c, (colorCount.get(c) ?? 0) + 1);
+      }
+    }
+    const topColors = Array.from(colorCount.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6);
+    return {
+      source: Array.isArray(editorPayload.voxels) && editorPayload.voxels.length > 0 ? "voxels" : "blocks",
+      voxels: Array.isArray(editorPayload.voxels) ? editorPayload.voxels.length : 0,
+      blocks: Array.isArray(editorPayload.blocks) ? editorPayload.blocks.length : 0,
+      topColors,
+    };
+  }, [editorPayload]);
   useEffect(() => {
     const saved = parseInt(localStorage.getItem("gitcity_rabbit_progress") ?? "0", 10) || 0;
     if (saved > 0) setRabbitProgress(saved);
@@ -592,6 +677,7 @@ function HomeContent() {
 
   // Auth state listener
   useEffect(() => {
+    if (!hasBrowserSupabaseEnv()) return;
     const supabase = createBrowserSupabase();
     supabase.auth.getSession().then(({ data: { session: s } }: { data: { session: Session | null } }) => {
       setSession(s);
@@ -691,6 +777,7 @@ function HomeContent() {
   // Forward ref from localStorage to auth callback URL
   const handleSignInWithRef = useCallback(async () => {
     trackSignInClicked("city");
+    if (!hasBrowserSupabaseEnv()) return;
     const supabase = createBrowserSupabase();
     let redirectTo = `${window.location.origin}/auth/callback`;
     try {
@@ -710,6 +797,7 @@ function HomeContent() {
 
   // Fetch activity feed on mount + poll every 60s
   useEffect(() => {
+    if (!supabaseEnabled) return;
     let cancelled = false;
     const fetchFeed = async () => {
       try {
@@ -722,7 +810,7 @@ function HomeContent() {
     fetchFeed();
     const interval = setInterval(fetchFeed, 120000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, []);
+  }, [supabaseEnabled]);
 
   // Visit tracking: fire visit POST after 3s of profile card open
   useEffect(() => {
@@ -992,6 +1080,18 @@ function HomeContent() {
   }, [rabbitSighting, session, buildings, handleSignInWithRef]);
 
   const reloadCity = useCallback(async (bustCache = false) => {
+    if (!supabaseEnabled) {
+      const localLayout = generateCityLayout([]);
+      setStats({ total_developers: 0, total_contributions: 0 });
+      setBuildings(localLayout.buildings);
+      setPlazas(localLayout.plazas);
+      setDecorations(localLayout.decorations);
+      setRiver(localLayout.river);
+      setBridges(localLayout.bridges);
+      setDistrictZones(localLayout.districtZones);
+      return localLayout.buildings;
+    }
+
     if (bustCache) clearCityCache();
     const cacheBust = bustCache ? `?_t=${Date.now()}` : "";
 
@@ -1095,6 +1195,20 @@ function HomeContent() {
 
     async function loadCity() {
       try {
+        if (!supabaseEnabled) {
+          const localLayout = generateCityLayout([]);
+          setStats({ total_developers: 0, total_contributions: 0 });
+          setBuildings(localLayout.buildings);
+          setPlazas(localLayout.plazas);
+          setDecorations(localLayout.decorations);
+          setRiver(localLayout.river);
+          setBridges(localLayout.bridges);
+          setDistrictZones(localLayout.districtZones);
+          setLoadProgress(100);
+          setLoadStage("done");
+          return;
+        }
+
         // WebGL check
         setLoadStage("init");
         setLoadProgress(3);
@@ -1264,7 +1378,7 @@ function HomeContent() {
     setIntroMode(true);
     setIntroPhase(-1);
     setIntroConfetti(false);
-  }, []);
+  }, [supabaseEnabled]);
 
   // Focus on building from ?user= query param (skip if gift redirect, handled separately)
   const didFocusUserParam = useRef(false);
@@ -1616,14 +1730,16 @@ if (claimingGift) return;
 
   // Fetch milestone celebrations on mount
   useEffect(() => {
+    if (!supabaseEnabled) return;
     fetch("/api/milestone-celebration")
       .then((r) => r.ok ? r.json() : [])
       .then((data) => { if (Array.isArray(data)) setMilestoneCelebrations(data); })
       .catch(() => {});
-  }, []);
+  }, [supabaseEnabled]);
 
   // Record milestone when crossed
   useEffect(() => {
+    if (!supabaseEnabled) return;
     if (stats.total_developers < CELEBRATION_MILESTONES[0]) return;
     const current = [...CELEBRATION_MILESTONES].reverse().find((m) => stats.total_developers >= m);
     if (!current) return;
@@ -1644,7 +1760,7 @@ if (claimingGift) return;
         }
       })
       .catch(() => {});
-  }, [stats.total_developers, milestoneCelebrations]);
+  }, [stats.total_developers, milestoneCelebrations, supabaseEnabled]);
 
   // Feature 1: Daily Challenge Nudge — show after load if user has history but hasn't played today
   useEffect(() => {
@@ -1693,7 +1809,8 @@ if (claimingGift) return;
     <main className="relative min-h-screen overflow-hidden bg-bg font-pixel uppercase text-warm">
       {/* 3D Canvas */}
       <CityCanvas
-        buildings={buildings}
+        buildings={renderBuildings}
+        editorPayload={editorPayload}
         plazas={plazas}
         decorations={decorations}
         river={river}
@@ -1788,7 +1905,7 @@ if (claimingGift) return;
           // Find nearest building to determine district
           let nearestDistrict: string | null = null;
           let bestDist = Infinity;
-          for (const b of buildings) {
+          for (const b of renderBuildings) {
             const dx = mapX - b.position[0], dz = mapZ - b.position[2];
             const dist = dx * dx + dz * dz;
             if (dist < bestDist) { bestDist = dist; nearestDistrict = b.district ?? "fullstack"; }
@@ -1930,6 +2047,18 @@ if (claimingGift) return;
           }
         }}
       />
+
+      {editorDebugInfo && (
+        <div className="pointer-events-none fixed right-2 bottom-2 z-[60] border border-border bg-bg/85 px-2 py-2 text-[9px] normal-case text-cream">
+          <div>Editor debug</div>
+          <div>source: {editorDebugInfo.source}</div>
+          <div>voxels: {editorDebugInfo.voxels}</div>
+          <div>blocks: {editorDebugInfo.blocks}</div>
+          <div>
+            colors: {editorDebugInfo.topColors.map(([c, n]) => `${c}:${n}`).join(" | ")}
+          </div>
+        </div>
+      )}
 
       {/* Loading screen overlay */}
       {loadStage !== "done" && (
@@ -2204,7 +2333,7 @@ if (claimingGift) return;
 
       {/* ─── Mini-map ─── */}
       <MiniMap
-        buildings={buildings}
+        buildings={renderBuildings}
         playerX={playerPos.x}
         playerZ={playerPos.z}
         visible={flyMode}
