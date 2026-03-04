@@ -108,6 +108,15 @@ function parseEditorPayload(raw: string | null): EditorSavedPayload | null {
   }
 }
 
+function normalizeEditorPayload(value: unknown): EditorSavedPayload | null {
+  if (!value || typeof value !== "object") return null;
+  const parsed = value as EditorSavedPayload;
+  const hasBlocks = Array.isArray(parsed.blocks) && parsed.blocks.length > 0;
+  const hasVoxels = Array.isArray(parsed.voxels) && parsed.voxels.length > 0;
+  if (!hasBlocks && !hasVoxels) return null;
+  return parsed;
+}
+
 
 // Achievement display data for profile card (client-side, mirrors DB)
 const TIER_COLORS_MAP: Record<string, string> = {
@@ -1634,6 +1643,28 @@ if (claimingGift) return;
       setDistrictChooserOpen(true);
     }
   }, [shouldShowDistrictChooser]);
+
+  useEffect(() => {
+    if (!session || !myBuilding?.claimed) return;
+    let cancelled = false;
+    const loadPublishedEditorBuilding = async () => {
+      try {
+        const res = await fetch("/api/building-editor", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const published = normalizeEditorPayload(data?.published);
+        if (published) {
+          setEditorPayload(published);
+          localStorage.setItem(EDITOR_BUILDING_STORAGE_KEY, JSON.stringify(published));
+        }
+      } catch {}
+    };
+    void loadPublishedEditorBuilding();
+    return () => {
+      cancelled = true;
+    };
+  }, [session, myBuilding?.claimed]);
 
   // Streak auto check-in (1x per browser session)
   const { streakData } = useStreakCheckin(session, !!myBuilding?.claimed);
@@ -3238,6 +3269,17 @@ if (claimingGift) return;
                   >
                     {copied ? "Copied!" : "\uD83D\uDCCB Copy Invite Link"}
                   </button>
+                </div>
+              )}
+
+              {selectedBuilding.login.toLowerCase() === authLogin && (
+                <div className="mx-4 mb-3">
+                  <Link
+                    href={`/editor?max_floors=${Math.max(1, Math.min(50, myBuilding?.floors ?? selectedBuilding.floors ?? 50))}`}
+                    className="btn-press block w-full border-[2px] border-border py-1.5 text-center text-[9px] text-cream transition-colors hover:border-border-light"
+                  >
+                    Build Editor
+                  </Link>
                 </div>
               )}
 

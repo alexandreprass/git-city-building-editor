@@ -2,6 +2,7 @@
 
 import { OrbitControls } from "@react-three/drei";
 import { Canvas, type ThreeEvent } from "@react-three/fiber";
+import { useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 
@@ -24,6 +25,15 @@ type Voxel = {
   color: string;
 };
 
+type SavedPayload = {
+  version?: number;
+  grid?: { cols?: number; rows?: number; floors?: number; cellHeightFloor?: number };
+  footprint?: { lotWidth?: number; lotDepth?: number };
+  blocks?: Array<{ x?: number; top?: number; widthUnits?: number; heightUnits?: number; color?: string }>;
+  copy_all_sides?: boolean;
+  voxels?: Array<{ x?: number; y?: number; z?: number; color?: string }>;
+};
+
 // Match city lot footprint (src/lib/github.ts): LOT_W=38, LOT_D=32.
 // Keeping editor width aligned to LOT_W helps prevent overlap on placement.
 const COLS = 38;
@@ -32,12 +42,13 @@ const CITY_LOT_DEPTH = 32;
 const FLOOR_UNITS = 10;
 const MAX_FLOORS = 50;
 const MAJOR_GRID_COLUMNS = 4;
+const EDITOR_BUILDING_STORAGE_KEY = "gitcity_editor_building_v1";
 const AUTO_ROOF_COLORS = [
-  "#111111", // preto
-  "#6b4423", // marrom
-  "#2f6b3c", // verde
-  "#b78a1d", // amarelo
-  "#6b3f9e", // roxo
+  "#111111", // black
+  "#6b4423", // brown
+  "#2f6b3c", // green
+  "#b78a1d", // yellow
+  "#6b3f9e", // purple
   "#2a4f9e", // azul
 ];
 
@@ -361,12 +372,17 @@ function VoxelEditor3D({
 }
 
 export default function BuildingEditorPage() {
+  const searchParams = useSearchParams();
   const depth3d = CITY_LOT_DEPTH;
+  const maxFloorsQuery = Number(searchParams.get("max_floors") ?? MAX_FLOORS);
+  const maxFloors = Number.isFinite(maxFloorsQuery)
+    ? Math.max(1, Math.min(MAX_FLOORS, Math.floor(maxFloorsQuery)))
+    : MAX_FLOORS;
   const [tool, setTool] = useState<Tool>("draw");
   const [color, setColor] = useState(COLORS[0]);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [copyAllSides, setCopyAllSides] = useState(false);
-  const [floors, setFloors] = useState(12);
+  const [floors, setFloors] = useState(Math.min(12, maxFloors));
   const [isPointerDown, setIsPointerDown] = useState(false);
   const [paintWholeBlock, setPaintWholeBlock] = useState(false);
   const [copyFromFloor, setCopyFromFloor] = useState(1);
@@ -378,12 +394,18 @@ export default function BuildingEditorPage() {
   const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
   const [saveMessage, setSaveMessage] = useState("");
   const [saveOk, setSaveOk] = useState(false);
+  const [busyAction, setBusyAction] = useState<"draft" | "publish" | null>(null);
+  const [loadedFromCloud, setLoadedFromCloud] = useState(false);
 
   const rows = floors * FLOOR_UNITS;
   const floorOptions = useMemo(
-    () => Array.from({ length: MAX_FLOORS }, (_, i) => i + 1),
-    [],
+    () => Array.from({ length: maxFloors }, (_, i) => i + 1),
+    [maxFloors],
   );
+
+  useEffect(() => {
+    setFloors((prev) => Math.min(prev, maxFloors));
+  }, [maxFloors]);
 
   useEffect(() => {
     setBlocks((prev) => prev.filter((b) => b.top + b.h <= rows));
@@ -398,6 +420,96 @@ export default function BuildingEditorPage() {
     window.addEventListener("mouseup", stopPaint);
     return () => window.removeEventListener("mouseup", stopPaint);
   }, []);
+
+  function applyPayload(source: SavedPayload | null) {
+    if (!source || typeof source !== "object") return false;
+    const payloadBlocks = Array.isArray(source.blocks) ? source.blocks : [];
+    const payloadVoxels = Array.isArray(source.voxels) ? source.voxels : [];
+    if (payloadBlocks.length === 0 && payloadVoxels.length === 0) return false;
+
+    const nextFloorsRaw = Number(
+      source.grid?.floors ?? Math.ceil((Number(source.grid?.rows ?? 120) || 120) / FLOOR_UNITS),
+    );
+    const nextFloors = Number.isFinite(nextFloorsRaw)
+      ? Math.max(1, Math.min(maxFloors, Math.floor(nextFloorsRaw)))
+      : Math.min(12, maxFloors);
+
+    const nextBlocks: Block[] = payloadBlocks
+      .map((b, idx) => {
+        const x = Number(b.x ?? 0);
+        const top = Number(b.top ?? 0);
+        const w = Number(b.widthUnits ?? 1);
+        const h = Number(b.heightUnits ?? 1);
+        const c = typeof b.color === "string" ? b.color : COLORS[0];
+        if (!Number.isFinite(x) || !Number.isFinite(top) || !Number.isFinite(w) || !Number.isFinite(h)) return null;
+        return {
+          id: `load-${idx}-${x}-${top}`,
+          x: Math.max(0, Math.min(COLS - 1, Math.floor(x))),
+          top: Math.max(0, Math.floor(top)),
+          w: Math.max(1, Math.floor(w)),
+          h: Math.max(1, Math.floor(h)),
+          color: c,
+        } as Block;
+      })
+      .filter((b): b is Block => !!b);
+
+    const nextCopyAllSides = Boolean(source.copy_all_sides);
+    const baseVoxels = new Set(
+      blocksToVoxels(nextBlocks, depth3d, COLS, nextCopyAllSides).map((v) => voxelKey(v.x, v.y, v.z)),
+    );
+    const nextExtraVoxels: Voxel[] = payloadVoxels
+      .map((v) => {
+        const x = Number(v.x ?? 0);
+        const y = Number(v.y ?? 0);
+        const z = Number(v.z ?? 0);
+        const c = typeof v.color === "string" ? v.color : COLORS[0];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
+        return { x: Math.floor(x), y: Math.floor(y), z: Math.floor(z), color: c } as Voxel;
+      })
+      .filter((v): v is Voxel => !!v && !baseVoxels.has(voxelKey(v.x, v.y, v.z)));
+
+    setFloors(nextFloors);
+    setBlocks(nextBlocks.filter((b) => b.top + b.h <= nextFloors * FLOOR_UNITS));
+    setCopyAllSides(nextCopyAllSides);
+    setExtraVoxels(
+      nextExtraVoxels.filter(
+        (v) => v.y >= 0 && v.y < nextFloors * FLOOR_UNITS && v.x >= 0 && v.x < COLS && v.z >= 0 && v.z < depth3d,
+      ),
+    );
+    return true;
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    const loadSaved = async () => {
+      const localRaw = localStorage.getItem(EDITOR_BUILDING_STORAGE_KEY);
+      let localLoaded = false;
+      if (localRaw) {
+        try {
+          localLoaded = applyPayload(JSON.parse(localRaw) as SavedPayload);
+        } catch {}
+      }
+
+      try {
+        const res = await fetch("/api/building-editor", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelled) return;
+        const preferred = (data?.draft ?? data?.published) as SavedPayload | undefined;
+        if (preferred && applyPayload(preferred)) {
+          setLoadedFromCloud(true);
+          return;
+        }
+        if (!localLoaded) setLoadedFromCloud(false);
+      } catch {
+        if (!cancelled && !localLoaded) setLoadedFromCloud(false);
+      }
+    };
+    void loadSaved();
+    return () => {
+      cancelled = true;
+    };
+  }, [maxFloors]);
 
   const selectedModel = useMemo(
     () => ALL_MODELS.find((m) => m.id === selectedModelId) ?? null,
@@ -696,13 +808,14 @@ export default function BuildingEditorPage() {
     return visited.size === occupied.size;
   }
 
-  function saveBuilding() {
+  async function saveBuilding(mode: "draft" | "publish") {
     if (!isConnectedToBase3D(voxels, rows)) {
       setSaveOk(false);
       setSaveMessage("There is at least one piece not connected to the building. Please fix it.");
       return;
     }
 
+    setBusyAction(mode);
     const roofColor = AUTO_ROOF_COLORS[Math.floor(Math.random() * AUTO_ROOF_COLORS.length)];
     const voxelsWithRoof = addAutomaticRoof(voxels, roofColor);
 
@@ -752,9 +865,41 @@ export default function BuildingEditorPage() {
         payload,
       };
     } catch {}
-    localStorage.setItem("gitcity_editor_building_v1", JSON.stringify(payload));
-    setSaveOk(true);
-    setSaveMessage("Building saved successfully! It is now applied in the local city.");
+    localStorage.setItem(EDITOR_BUILDING_STORAGE_KEY, JSON.stringify(payload));
+    try {
+      const res = await fetch("/api/building-editor", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode, payload }),
+      });
+      if (res.ok) {
+        setSaveOk(true);
+        setLoadedFromCloud(true);
+        setSaveMessage(
+          mode === "publish"
+            ? "Published successfully! Your building is now live in the city."
+            : "Draft saved successfully.",
+        );
+      } else {
+        const body = await res.json().catch(() => ({}));
+        const msg = typeof body?.error === "string" ? body.error : "Failed to save to server.";
+        setSaveOk(mode === "draft");
+        setSaveMessage(
+          mode === "publish"
+            ? `Publish failed: ${msg}`
+            : `Draft saved locally, but cloud sync failed: ${msg}`,
+        );
+      }
+    } catch {
+      setSaveOk(mode === "draft");
+      setSaveMessage(
+        mode === "publish"
+          ? "Publish failed: network error."
+          : "Draft saved locally, but cloud sync failed.",
+      );
+    } finally {
+      setBusyAction(null);
+    }
   }
 
   function copyFloorPattern() {
@@ -843,7 +988,7 @@ export default function BuildingEditorPage() {
             </div>
 
             <div>
-              <p className="mb-2 text-xs text-muted">Cor</p>
+              <p className="mb-2 text-xs text-muted">Color</p>
               <div className="grid grid-cols-10 gap-1">
                 {COLORS.map((c) => (
                   <button
@@ -851,7 +996,7 @@ export default function BuildingEditorPage() {
                     onClick={() => setColor(c)}
                     className={`h-5 w-5 border ${color === c ? "border-cream" : "border-border"}`}
                     style={{ background: c }}
-                    aria-label={`Cor ${c}`}
+                    aria-label={`Color ${c}`}
                   />
                 ))}
               </div>
@@ -984,17 +1129,28 @@ export default function BuildingEditorPage() {
               </button>
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex flex-wrap gap-2">
               <button
-                onClick={saveBuilding}
-                className="border border-lime bg-lime px-3 py-2 text-xs text-black"
+                onClick={() => void saveBuilding("draft")}
+                disabled={busyAction !== null}
+                className="border border-border px-3 py-2 text-xs disabled:opacity-60"
               >
-                Save
+                {busyAction === "draft" ? "Saving..." : "Save draft"}
+              </button>
+              <button
+                onClick={() => void saveBuilding("publish")}
+                disabled={busyAction !== null}
+                className="border border-lime bg-lime px-3 py-2 text-xs text-black disabled:opacity-60"
+              >
+                {busyAction === "publish" ? "Publishing..." : "Publish to city"}
               </button>
               <button onClick={clearAll} className="border border-border px-3 py-2 text-xs">
                 Clear
               </button>
             </div>
+            <p className="text-[10px] text-muted">
+              Max floors for this account: {maxFloors}. {loadedFromCloud ? "Cloud project loaded." : "Using local project data."}
+            </p>
             {saveMessage && (
               <div
                 className={`border px-2 py-2 text-xs ${saveOk ? "border-green-500 text-green-300" : "border-red-500 text-red-300"}`}
